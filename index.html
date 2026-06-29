@@ -12,6 +12,10 @@
   .stream { margin: 6px 0; }
   .stream a { color: #4af; }
   #status { color: #fa4; margin-top: 8px; }
+  #proxy-log { margin-top: 1rem; font-size: 0.85rem; }
+  .proxy-try  { color: #aaa; }
+  .proxy-ok   { color: #4f4; }
+  .proxy-fail { color: #f44; }
 </style>
 </head>
 <body>
@@ -23,39 +27,63 @@
 </select>
 <button onclick="extract()">Extract</button>
 <div id="status"></div>
+<div id="proxy-log"></div>
 <div id="results"></div>
 
 <script>
 const BASE = "https://vixsrc.to";
 
 const PROXIES = [
-  url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  url => `https://thingproxy.freeboard.io/fetch/${url}`,
-  url => `https://api.codetabs.com/v1/proxy?quest=${url}`,
-  url => `https://cors.sh/?${url}`,
+  { name: "vixsrcproxy (workers.dev)", fn: url => `https://vixsrcproxy.khantara922.workers.dev/?url=${encodeURIComponent(url)}` },
+  { name: "corsproxy.io",              fn: url => `https://corsproxy.io/?url=${encodeURIComponent(url)}` },
+  { name: "allorigins.win",            fn: url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` },
+  { name: "thingproxy.freeboard.io",   fn: url => `https://thingproxy.freeboard.io/fetch/${url}` },
+  { name: "codetabs.com",             fn: url => `https://api.codetabs.com/v1/proxy?quest=${url}` },
+  { name: "cors.sh",                  fn: url => `https://cors.sh/?${url}` },
 ];
 
-async function fetchWithProxy(url, attempt = 0) {
-  if (attempt >= PROXIES.length) throw new Error("All proxies failed for: " + url);
-  const proxy = PROXIES[attempt];
-  try {
-    const r = await fetch(proxy(url));
-    const text = await r.text();
-    // detect proxy error responses
-    if (
-      text.includes("has been blocked") ||
-      text.includes("Access denied") ||
-      text.includes("error") && text.length < 200
-    ) {
-      console.warn(`Proxy ${attempt} failed, trying next...`);
-      return fetchWithProxy(url, attempt + 1);
-    }
-    return text;
-  } catch {
-    console.warn(`Proxy ${attempt} error, trying next...`);
-    return fetchWithProxy(url, attempt + 1);
+// Track which proxy succeeded last time so we start from it next call
+let lastWorkingProxy = 0;
+
+function logProxy(index, state, extra = "") {
+  const log = document.getElementById("proxy-log");
+  const id = `proxy-line-${index}`;
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    log.appendChild(el);
   }
+  const icon = state === "try" ? "⏳" : state === "ok" ? "✅" : "❌";
+  const cls  = state === "try" ? "proxy-try" : state === "ok" ? "proxy-ok" : "proxy-fail";
+  el.className = cls;
+  el.textContent = `${icon} [${index + 1}/${PROXIES.length}] ${PROXIES[index].name}${extra ? " — " + extra : ""}`;
+}
+
+async function fetchWithProxy(url, startFrom = 0) {
+  for (let i = startFrom; i < PROXIES.length; i++) {
+    logProxy(i, "try");
+    try {
+      const r = await fetch(PROXIES[i].fn(url));
+      const text = await r.text();
+
+      if (
+        text.includes("has been blocked") ||
+        text.includes("Access denied") ||
+        (text.toLowerCase().includes("error") && text.length < 200)
+      ) {
+        logProxy(i, "fail", "blocked/error response");
+        continue;
+      }
+
+      logProxy(i, "ok", `${text.length} bytes`);
+      lastWorkingProxy = i;
+      return text;
+    } catch (e) {
+      logProxy(i, "fail", e.message);
+    }
+  }
+  throw new Error("All proxies failed for: " + url);
 }
 
 function tryDecode(raw) {
@@ -73,16 +101,17 @@ async function extract() {
   const type = document.getElementById("type").value;
   const status = document.getElementById("status");
   const results = document.getElementById("results");
+  document.getElementById("proxy-log").innerHTML = "";
   results.innerHTML = "";
 
   if (!tmdb) { status.textContent = "Enter a TMDB ID."; return; }
 
   try {
     status.textContent = "Warming up...";
-    await fetchWithProxy(`${BASE}/${type}/${tmdb}`);
+    await fetchWithProxy(`${BASE}/${type}/${tmdb}`, lastWorkingProxy);
 
     status.textContent = "Calling API...";
-    const raw = await fetchWithProxy(`${BASE}/api/${type}/${tmdb}`);
+    const raw = await fetchWithProxy(`${BASE}/api/${type}/${tmdb}`, lastWorkingProxy);
     console.log("API raw:", raw.slice(0, 200));
 
     const data = tryDecode(raw);
@@ -95,7 +124,7 @@ async function extract() {
     console.log("Embed:", embed);
 
     status.textContent = "Loading embed...";
-    const html = await fetchWithProxy(embed);
+    const html = await fetchWithProxy(embed, lastWorkingProxy);
     console.log("Embed snippet:", html.slice(0, 400));
 
     const url   = html.match(/url\s*:\s*['"]([^'"]+)['"]/)?.[1];
@@ -108,7 +137,7 @@ async function extract() {
     const master = `${url}?token=${token}&expires=${exp}&h=1&lang=en`;
 
     status.textContent = "Fetching M3U8...";
-    const m3u8 = await fetchWithProxy(master);
+    const m3u8 = await fetchWithProxy(master, lastWorkingProxy);
     console.log("M3U8:", m3u8.slice(0, 300));
 
     if (!m3u8.includes("#EXTM3U")) throw new Error("Invalid M3U8");
