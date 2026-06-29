@@ -27,20 +27,45 @@
 
 <script>
 const BASE = "https://vixsrc.to";
-const PROXY = "https://corsproxy.io/?url=";
 
-function p(url) { return PROXY + encodeURIComponent(url); }
+const PROXIES = [
+  url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://thingproxy.freeboard.io/fetch/${url}`,
+  url => `https://api.codetabs.com/v1/proxy?quest=${url}`,
+  url => `https://cors.sh/?${url}`,
+];
+
+async function fetchWithProxy(url, attempt = 0) {
+  if (attempt >= PROXIES.length) throw new Error("All proxies failed for: " + url);
+  const proxy = PROXIES[attempt];
+  try {
+    const r = await fetch(proxy(url));
+    const text = await r.text();
+    // detect proxy error responses
+    if (
+      text.includes("has been blocked") ||
+      text.includes("Access denied") ||
+      text.includes("error") && text.length < 200
+    ) {
+      console.warn(`Proxy ${attempt} failed, trying next...`);
+      return fetchWithProxy(url, attempt + 1);
+    }
+    return text;
+  } catch {
+    console.warn(`Proxy ${attempt} error, trying next...`);
+    return fetchWithProxy(url, attempt + 1);
+  }
+}
 
 function tryDecode(raw) {
   raw = raw.trim();
-  // try plain JSON
   try { return JSON.parse(raw); } catch {}
-  // try base64
   try {
     const pad = raw + "=".repeat((4 - raw.length % 4) % 4);
     return JSON.parse(atob(pad.replace(/-/g,'+').replace(/_/g,'/')));
   } catch {}
-  throw new Error("Could not decode API response: " + raw.slice(0, 100));
+  throw new Error("Could not decode API response: " + raw.slice(0, 150));
 }
 
 async function extract() {
@@ -53,52 +78,43 @@ async function extract() {
   if (!tmdb) { status.textContent = "Enter a TMDB ID."; return; }
 
   try {
-    // Step 1: warm up
-    status.textContent = "Warming up session...";
-    await fetch(p(`${BASE}/${type}/${tmdb}`));
+    status.textContent = "Warming up...";
+    await fetchWithProxy(`${BASE}/${type}/${tmdb}`);
 
-    // Step 2: internal API
     status.textContent = "Calling API...";
-    const r = await fetch(p(`${BASE}/api/${type}/${tmdb}`), {
-      headers: { "Accept": "application/json, text/plain, */*" }
-    });
-    const raw = await r.text();
+    const raw = await fetchWithProxy(`${BASE}/api/${type}/${tmdb}`);
     console.log("API raw:", raw.slice(0, 200));
 
     const data = tryDecode(raw);
     console.log("API data:", data);
 
-    if (!data.src) throw new Error("API returned no src field. Response: " + JSON.stringify(data));
+    if (!data.src) throw new Error("No src in API response: " + JSON.stringify(data));
 
     const src = data.src;
     const embed = src.startsWith("/") ? BASE + src : src;
-    console.log("Embed URL:", embed);
+    console.log("Embed:", embed);
 
-    // Step 3: embed page
-    status.textContent = "Loading embed page...";
-    const r2 = await fetch(p(embed));
-    const html = await r2.text();
-    console.log("Embed HTML snippet:", html.slice(0, 500));
+    status.textContent = "Loading embed...";
+    const html = await fetchWithProxy(embed);
+    console.log("Embed snippet:", html.slice(0, 400));
 
     const url   = html.match(/url\s*:\s*['"]([^'"]+)['"]/)?.[1];
     const token = html.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
     const exp   = html.match(/['"]expires['"]\s*:\s*['"]([^'"]*)['"]/)?.[1];
 
-    console.log("Parsed:", { url, token, exp });
-    if (!url || !token) throw new Error("Could not parse masterPlaylist from embed page");
+    console.log({url, token, exp});
+    if (!url || !token) throw new Error("Could not parse masterPlaylist");
 
     const master = `${url}?token=${token}&expires=${exp}&h=1&lang=en`;
 
-    // Step 4: fetch M3U8
     status.textContent = "Fetching M3U8...";
-    const r3 = await fetch(p(master));
-    const m3u8 = await r3.text();
+    const m3u8 = await fetchWithProxy(master);
     console.log("M3U8:", m3u8.slice(0, 300));
 
-    if (!m3u8.includes("#EXTM3U")) throw new Error("Invalid M3U8 response");
+    if (!m3u8.includes("#EXTM3U")) throw new Error("Invalid M3U8");
 
     const lines = m3u8.split("\n");
-    let out = `<p><b>Master M3U8:</b> <a href="${master}" target="_blank">${master}</a></p>`;
+    let out = `<p><b>Master:</b> <a href="${master}" target="_blank">${master}</a></p>`;
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
         const res = lines[i].match(/RESOLUTION=(\d+x\d+)/)?.[1] ?? "unknown";
