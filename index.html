@@ -31,61 +31,87 @@ const PROXY = "https://corsproxy.io/?url=";
 
 function p(url) { return PROXY + encodeURIComponent(url); }
 
+function tryDecode(raw) {
+  raw = raw.trim();
+  // try plain JSON
+  try { return JSON.parse(raw); } catch {}
+  // try base64
+  try {
+    const pad = raw + "=".repeat((4 - raw.length % 4) % 4);
+    return JSON.parse(atob(pad.replace(/-/g,'+').replace(/_/g,'/')));
+  } catch {}
+  throw new Error("Could not decode API response: " + raw.slice(0, 100));
+}
+
 async function extract() {
   const tmdb = document.getElementById("tmdb").value.trim();
   const type = document.getElementById("type").value;
   const status = document.getElementById("status");
   const results = document.getElementById("results");
   results.innerHTML = "";
-  status.textContent = "Fetching...";
+
+  if (!tmdb) { status.textContent = "Enter a TMDB ID."; return; }
 
   try {
     // Step 1: warm up
+    status.textContent = "Warming up session...";
     await fetch(p(`${BASE}/${type}/${tmdb}`));
 
-    // Step 2: API
+    // Step 2: internal API
+    status.textContent = "Calling API...";
     const r = await fetch(p(`${BASE}/api/${type}/${tmdb}`), {
       headers: { "Accept": "application/json, text/plain, */*" }
     });
     const raw = await r.text();
-    let data;
-    try { data = JSON.parse(raw); }
-    catch { data = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/'))); }
+    console.log("API raw:", raw.slice(0, 200));
+
+    const data = tryDecode(raw);
+    console.log("API data:", data);
+
+    if (!data.src) throw new Error("API returned no src field. Response: " + JSON.stringify(data));
 
     const src = data.src;
     const embed = src.startsWith("/") ? BASE + src : src;
+    console.log("Embed URL:", embed);
 
     // Step 3: embed page
-    status.textContent = "Loading embed...";
+    status.textContent = "Loading embed page...";
     const r2 = await fetch(p(embed));
     const html = await r2.text();
+    console.log("Embed HTML snippet:", html.slice(0, 500));
 
-    const url    = html.match(/url\s*:\s*['"]([^'"]+)['"]/)?.[1];
-    const token  = html.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
-    const exp    = html.match(/['"]expires['"]\s*:\s*['"]([^'"]*)['"]/)?.[1];
+    const url   = html.match(/url\s*:\s*['"]([^'"]+)['"]/)?.[1];
+    const token = html.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
+    const exp   = html.match(/['"]expires['"]\s*:\s*['"]([^'"]*)['"]/)?.[1];
 
-    if (!url || !token) throw new Error("Could not parse masterPlaylist");
+    console.log("Parsed:", { url, token, exp });
+    if (!url || !token) throw new Error("Could not parse masterPlaylist from embed page");
 
     const master = `${url}?token=${token}&expires=${exp}&h=1&lang=en`;
 
-    // Step 4: M3U8
+    // Step 4: fetch M3U8
     status.textContent = "Fetching M3U8...";
     const r3 = await fetch(p(master));
     const m3u8 = await r3.text();
+    console.log("M3U8:", m3u8.slice(0, 300));
+
+    if (!m3u8.includes("#EXTM3U")) throw new Error("Invalid M3U8 response");
 
     const lines = m3u8.split("\n");
-    let html_out = `<p><b>Master:</b> <a href="${master}" target="_blank">open</a></p>`;
+    let out = `<p><b>Master M3U8:</b> <a href="${master}" target="_blank">${master}</a></p>`;
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
         const res = lines[i].match(/RESOLUTION=(\d+x\d+)/)?.[1] ?? "unknown";
         const uri = lines[i+1]?.trim();
-        if (uri) html_out += `<div class="stream"><b>${res}</b> — <a href="${uri}" target="_blank">${uri}</a></div>`;
+        if (uri) out += `<div class="stream"><b>${res}</b> — <a href="${uri}" target="_blank">${uri}</a></div>`;
       }
     }
-    results.innerHTML = html_out;
+    results.innerHTML = out;
     status.textContent = "Done.";
+
   } catch(e) {
     status.textContent = "Error: " + e.message;
+    console.error(e);
   }
 }
 </script>
