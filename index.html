@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VixSrc Extractor</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 2rem; }
+  input, select, button { padding: 8px; margin: 4px; background: #222; color: #eee; border: 1px solid #444; }
+  button { cursor: pointer; background: #333; }
+  button:hover { background: #555; }
+  #results { margin-top: 1rem; }
+  .stream { margin: 6px 0; }
+  .stream a { color: #4af; }
+  #status { color: #fa4; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h2>VixSrc Extractor</h2>
+<input id="tmdb" placeholder="TMDB ID e.g. 786892" style="width:200px">
+<select id="type">
+  <option value="movie">Movie</option>
+  <option value="tv">TV</option>
+</select>
+<button onclick="extract()">Extract</button>
+<div id="status"></div>
+<div id="results"></div>
+
+<script>
+const BASE = "https://vixsrc.to";
+const PROXY = "https://corsproxy.io/?url=";
+
+function p(url) { return PROXY + encodeURIComponent(url); }
+
+async function extract() {
+  const tmdb = document.getElementById("tmdb").value.trim();
+  const type = document.getElementById("type").value;
+  const status = document.getElementById("status");
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+  status.textContent = "Fetching...";
+
+  try {
+    // Step 1: warm up
+    await fetch(p(`${BASE}/${type}/${tmdb}`));
+
+    // Step 2: API
+    const r = await fetch(p(`${BASE}/api/${type}/${tmdb}`), {
+      headers: { "Accept": "application/json, text/plain, */*" }
+    });
+    const raw = await r.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { data = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/'))); }
+
+    const src = data.src;
+    const embed = src.startsWith("/") ? BASE + src : src;
+
+    // Step 3: embed page
+    status.textContent = "Loading embed...";
+    const r2 = await fetch(p(embed));
+    const html = await r2.text();
+
+    const url    = html.match(/url\s*:\s*['"]([^'"]+)['"]/)?.[1];
+    const token  = html.match(/['"]token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
+    const exp    = html.match(/['"]expires['"]\s*:\s*['"]([^'"]*)['"]/)?.[1];
+
+    if (!url || !token) throw new Error("Could not parse masterPlaylist");
+
+    const master = `${url}?token=${token}&expires=${exp}&h=1&lang=en`;
+
+    // Step 4: M3U8
+    status.textContent = "Fetching M3U8...";
+    const r3 = await fetch(p(master));
+    const m3u8 = await r3.text();
+
+    const lines = m3u8.split("\n");
+    let html_out = `<p><b>Master:</b> <a href="${master}" target="_blank">open</a></p>`;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+        const res = lines[i].match(/RESOLUTION=(\d+x\d+)/)?.[1] ?? "unknown";
+        const uri = lines[i+1]?.trim();
+        if (uri) html_out += `<div class="stream"><b>${res}</b> — <a href="${uri}" target="_blank">${uri}</a></div>`;
+      }
+    }
+    results.innerHTML = html_out;
+    status.textContent = "Done.";
+  } catch(e) {
+    status.textContent = "Error: " + e.message;
+  }
+}
+</script>
+</body>
+</html>
